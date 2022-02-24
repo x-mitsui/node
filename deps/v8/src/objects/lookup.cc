@@ -587,7 +587,7 @@ void LookupIterator::PrepareTransitionToDataProperty(
       // Don't set enumeration index (it will be set during value store).
       property_details_ =
           PropertyDetails(PropertyKind::kData, attributes,
-                          PropertyCell::InitialType(isolate_, value));
+                          PropertyCell::InitialType(isolate_, *value));
       transition_ = isolate_->factory()->NewPropertyCell(
           name(), property_details_, value);
       has_property_ = true;
@@ -926,8 +926,8 @@ Handle<Object> LookupIterator::FetchValue(
         field_index.is_inobject() && field_index.is_double()) {
       return isolate_->factory()->undefined_value();
     }
-    return JSObject::FastPropertyAt(holder, property_details_.representation(),
-                                    field_index);
+    return JSObject::FastPropertyAt(
+        isolate_, holder, property_details_.representation(), field_index);
   } else {
     result =
         holder_->map(isolate_).instance_descriptors(isolate_).GetStrongValue(
@@ -1061,6 +1061,7 @@ void LookupIterator::WriteDataValue(Handle<Object> value,
   // WasmObjects.
   DCHECK(!holder_->IsWasmObject(isolate_));
 #endif  // V8_ENABLE_WEBASSEMBLY
+  DCHECK_IMPLIES(holder_->IsJSSharedStruct(), value->IsShared());
 
   Handle<JSReceiver> holder = GetHolder<JSReceiver>();
   if (IsElement(*holder)) {

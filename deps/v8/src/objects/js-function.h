@@ -84,14 +84,12 @@ class JSFunction
   // optimized code object, or when reading from the background thread.
   // Storing a builtin doesn't require release semantics because these objects
   // are fully initialized.
-  DECL_ACCESSORS(code, Code)
-  DECL_RELEASE_ACQUIRE_ACCESSORS(code, Code)
+  DECL_ACCESSORS(code, CodeT)
+  DECL_RELEASE_ACQUIRE_ACCESSORS(code, CodeT)
 #ifdef V8_EXTERNAL_CODE_SPACE
   // Convenient overloads to avoid unnecessary Code <-> CodeT conversions.
   // TODO(v8:11880): remove once |code| accessors are migrated to CodeT.
-  inline void set_code(CodeT code,
-                       WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
-  inline void set_code(CodeT code, ReleaseStoreTag,
+  inline void set_code(Code code, ReleaseStoreTag,
                        WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 #endif
 
@@ -131,10 +129,7 @@ class JSFunction
   V8_EXPORT_PRIVATE bool ActiveTierIsIgnition() const;
   bool ActiveTierIsTurbofan() const;
   bool ActiveTierIsBaseline() const;
-  bool ActiveTierIsMidtierTurboprop() const;
-  bool ActiveTierIsToptierTurboprop() const;
-
-  CodeKind NextTier() const;
+  bool ActiveTierIsMaglev() const;
 
   // Similar to SharedFunctionInfo::CanDiscardCompiled. Returns true, if the
   // attached code can be recreated at a later point by replacing it with
@@ -150,7 +145,10 @@ class JSFunction
 
   // Mark this function for lazy recompilation. The function will be recompiled
   // the next time it is executed.
-  inline void MarkForOptimization(ConcurrencyMode mode);
+  void MarkForOptimization(Isolate* isolate, CodeKind target_kind,
+                           ConcurrencyMode mode);
+  // TODO(v8:7700): Remove this function and pass the CodeKind explicitly.
+  void MarkForOptimization(ConcurrencyMode mode);
 
   // Tells whether or not the function is already marked for lazy recompilation.
   inline bool IsMarkedForOptimization();
@@ -317,9 +315,6 @@ class JSFunction
   class BodyDescriptor;
 
  private:
-  DECL_ACCESSORS(raw_code, CodeT)
-  DECL_RELEASE_ACQUIRE_ACCESSORS(raw_code, CodeT)
-
   // JSFunction doesn't have a fixed header size:
   // Hide TorqueGeneratedClass::kHeaderSize to avoid confusion.
   static const int kHeaderSize;

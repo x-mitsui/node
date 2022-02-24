@@ -195,8 +195,10 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     __ CheckPageFlag(value_, MemoryChunk::kPointersToHereAreInterestingMask, eq,
                      exit());
     RememberedSetAction const remembered_set_action =
-        mode_ > RecordWriteMode::kValueIsMap ? RememberedSetAction::kEmit
-                                             : RememberedSetAction::kOmit;
+        mode_ > RecordWriteMode::kValueIsMap ||
+                FLAG_use_full_record_write_builtin
+            ? RememberedSetAction::kEmit
+            : RememberedSetAction::kOmit;
     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
                                             ? SaveFPRegsMode::kSave
                                             : SaveFPRegsMode::kIgnore;
@@ -3548,8 +3550,9 @@ void CodeGenerator::AssembleArchDeoptBranch(Instruction* instr,
   AssembleArchBranch(instr, branch);
 }
 
-void CodeGenerator::AssembleArchJump(RpoNumber target) {
-  if (!IsNextInAssemblyOrder(target)) __ b(GetLabel(target));
+void CodeGenerator::AssembleArchJumpRegardlessOfAssemblyOrder(
+    RpoNumber target) {
+  __ b(GetLabel(target));
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -3877,20 +3880,11 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
     // DropArguments().
     DCHECK_EQ(0u, call_descriptor->CalleeSavedRegisters() & argc_reg.bit());
     if (parameter_slots > 1) {
-      if (kJSArgcIncludesReceiver) {
-        __ cmp(argc_reg, Operand(parameter_slots));
-        __ mov(argc_reg, Operand(parameter_slots), LeaveCC, lt);
-      } else {
-        const int parameter_slots_without_receiver = parameter_slots - 1;
-        __ cmp(argc_reg, Operand(parameter_slots_without_receiver));
-        __ mov(argc_reg, Operand(parameter_slots_without_receiver), LeaveCC,
-               lt);
-      }
+      __ cmp(argc_reg, Operand(parameter_slots));
+      __ mov(argc_reg, Operand(parameter_slots), LeaveCC, lt);
     }
     __ DropArguments(argc_reg, TurboAssembler::kCountIsInteger,
-                     kJSArgcIncludesReceiver
-                         ? TurboAssembler::kCountIncludesReceiver
-                         : TurboAssembler::kCountExcludesReceiver);
+                     TurboAssembler::kCountIncludesReceiver);
   } else if (additional_pop_count->IsImmediate()) {
     DCHECK_EQ(Constant::kInt32, g.ToConstant(additional_pop_count).type());
     int additional_count = g.ToConstant(additional_pop_count).ToInt32();

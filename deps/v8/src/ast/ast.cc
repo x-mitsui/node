@@ -268,6 +268,14 @@ bool FunctionLiteral::private_name_lookup_skips_outer_class() const {
   return scope()->private_name_lookup_skips_outer_class();
 }
 
+bool FunctionLiteral::class_scope_has_private_brand() const {
+  return scope()->class_scope_has_private_brand();
+}
+
+void FunctionLiteral::set_class_scope_has_private_brand(bool value) {
+  return scope()->set_class_scope_has_private_brand(value);
+}
+
 ObjectLiteralProperty::ObjectLiteralProperty(Expression* key, Expression* value,
                                              Kind kind, bool is_computed_name)
     : LiteralProperty(key, value, is_computed_name),
@@ -669,7 +677,8 @@ void ArrayLiteral::BuildBoilerplateDescription(IsolateT* isolate) {
   // elements array to a copy-on-write array.
   if (is_simple() && depth() == 1 && array_index > 0 &&
       IsSmiOrObjectElementsKind(kind)) {
-    elements->set_map(ReadOnlyRoots(isolate).fixed_cow_array_map());
+    elements->set_map_safe_transition(
+        ReadOnlyRoots(isolate).fixed_cow_array_map());
   }
 
   boilerplate_description_ =
@@ -761,36 +770,44 @@ template EXPORT_TEMPLATE_DEFINE(
 template <typename IsolateT>
 Handle<TemplateObjectDescription> GetTemplateObject::GetOrBuildDescription(
     IsolateT* isolate) {
-  Handle<FixedArray> raw_strings = isolate->factory()->NewFixedArray(
+  Handle<FixedArray> raw_strings_handle = isolate->factory()->NewFixedArray(
       this->raw_strings()->length(), AllocationType::kOld);
   bool raw_and_cooked_match = true;
-  for (int i = 0; i < raw_strings->length(); ++i) {
-    if (this->raw_strings()->at(i) != this->cooked_strings()->at(i)) {
-      // If the AstRawStrings don't match, then neither should the allocated
-      // Strings, since the AstValueFactory should have deduplicated them
-      // already.
-      DCHECK_IMPLIES(this->cooked_strings()->at(i) != nullptr,
-                     *this->cooked_strings()->at(i)->string() !=
-                         *this->raw_strings()->at(i)->string());
+  {
+    DisallowGarbageCollection no_gc;
+    FixedArray raw_strings = *raw_strings_handle;
 
-      raw_and_cooked_match = false;
+    for (int i = 0; i < raw_strings.length(); ++i) {
+      if (this->raw_strings()->at(i) != this->cooked_strings()->at(i)) {
+        // If the AstRawStrings don't match, then neither should the allocated
+        // Strings, since the AstValueFactory should have deduplicated them
+        // already.
+        DCHECK_IMPLIES(this->cooked_strings()->at(i) != nullptr,
+                       *this->cooked_strings()->at(i)->string() !=
+                           *this->raw_strings()->at(i)->string());
+
+        raw_and_cooked_match = false;
+      }
+      raw_strings.set(i, *this->raw_strings()->at(i)->string());
     }
-    raw_strings->set(i, *this->raw_strings()->at(i)->string());
   }
-  Handle<FixedArray> cooked_strings = raw_strings;
+  Handle<FixedArray> cooked_strings_handle = raw_strings_handle;
   if (!raw_and_cooked_match) {
-    cooked_strings = isolate->factory()->NewFixedArray(
+    cooked_strings_handle = isolate->factory()->NewFixedArray(
         this->cooked_strings()->length(), AllocationType::kOld);
-    for (int i = 0; i < cooked_strings->length(); ++i) {
+    DisallowGarbageCollection no_gc;
+    FixedArray cooked_strings = *cooked_strings_handle;
+    ReadOnlyRoots roots(isolate);
+    for (int i = 0; i < cooked_strings.length(); ++i) {
       if (this->cooked_strings()->at(i) != nullptr) {
-        cooked_strings->set(i, *this->cooked_strings()->at(i)->string());
+        cooked_strings.set(i, *this->cooked_strings()->at(i)->string());
       } else {
-        cooked_strings->set(i, ReadOnlyRoots(isolate).undefined_value());
+        cooked_strings.set_undefined(roots, i);
       }
     }
   }
-  return isolate->factory()->NewTemplateObjectDescription(raw_strings,
-                                                          cooked_strings);
+  return isolate->factory()->NewTemplateObjectDescription(
+      raw_strings_handle, cooked_strings_handle);
 }
 template EXPORT_TEMPLATE_DEFINE(V8_BASE_EXPORT)
     Handle<TemplateObjectDescription> GetTemplateObject::GetOrBuildDescription(

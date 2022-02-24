@@ -461,7 +461,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
     __ LoadContext(kContextRegister);
     __ LoadFunction(kJSFunctionRegister);
     __ masm()->Push(kJSFunctionRegister);
-    __ CallRuntime(Runtime::kBytecodeBudgetInterruptFromBytecode, 1);
+    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
 
     __ masm()->Pop(params_size, kInterpreterAccumulatorRegister);
     __ masm()->SmiUntag(params_size);
@@ -488,9 +488,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
 
   // Drop receiver + arguments.
   __ masm()->DropArguments(params_size, TurboAssembler::kCountIsInteger,
-                           kJSArgcIncludesReceiver
-                               ? TurboAssembler::kCountIncludesReceiver
-                               : TurboAssembler::kCountExcludesReceiver);
+                           TurboAssembler::kCountIncludesReceiver);
 
   __ masm()->Ret();
 }

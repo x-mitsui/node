@@ -225,8 +225,7 @@ void AccessorAssembler::HandleLoadICHandlerCase(
 
   BIND(&call_handler);
   {
-    // TODO(v8:11880): call CodeT directly.
-    TNode<Code> code_handler = FromCodeT(CAST(handler));
+    TNode<CodeT> code_handler = CAST(handler);
     exit_point->ReturnCallStub(LoadWithVectorDescriptor{}, code_handler,
                                p->context(), p->lookup_start_object(),
                                p->name(), p->slot(), p->vector());
@@ -1187,6 +1186,37 @@ void AccessorAssembler::HandleStoreICNativeDataProperty(
                   holder, accessor_info, p->name(), p->value());
 }
 
+void AccessorAssembler::HandleStoreICSmiHandlerJSSharedStructFieldCase(
+    TNode<Context> context, TNode<Word32T> handler_word, TNode<JSObject> holder,
+    TNode<Object> value) {
+  CSA_DCHECK(this,
+             Word32Equal(DecodeWord32<StoreHandler::KindBits>(handler_word),
+                         STORE_KIND(kSharedStructField)));
+  CSA_DCHECK(
+      this,
+      Word32Equal(DecodeWord32<StoreHandler::RepresentationBits>(handler_word),
+                  Int32Constant(Representation::kTagged)));
+
+  TVARIABLE(Object, shared_value, value);
+  SharedValueBarrier(context, value, &shared_value);
+
+  TNode<BoolT> is_inobject =
+      IsSetWord32<StoreHandler::IsInobjectBits>(handler_word);
+  TNode<HeapObject> property_storage = Select<HeapObject>(
+      is_inobject, [&]() { return holder; },
+      [&]() { return LoadFastProperties(holder); });
+
+  TNode<UintPtrT> index =
+      DecodeWordFromWord32<StoreHandler::FieldIndexBits>(handler_word);
+  TNode<IntPtrT> offset = Signed(TimesTaggedSize(index));
+
+  StoreJSSharedStructInObjectField(property_storage, offset,
+                                   shared_value.value());
+
+  // Return the original value.
+  Return(value);
+}
+
 void AccessorAssembler::HandleStoreICHandlerCase(
     const StoreICParameters* p, TNode<MaybeObject> handler, Label* miss,
     ICMode ic_mode, ElementSupport support_elements) {
@@ -1270,16 +1300,23 @@ void AccessorAssembler::HandleStoreICHandlerCase(
 
     BIND(&if_fast_smi);
     {
-      Label data(this), accessor(this), native_data_property(this);
+      Label data(this), accessor(this), shared_struct_field(this),
+          native_data_property(this);
       GotoIf(Word32Equal(handler_kind, STORE_KIND(kAccessor)), &accessor);
-      Branch(Word32Equal(handler_kind, STORE_KIND(kNativeDataProperty)),
-             &native_data_property, &data);
+      GotoIf(Word32Equal(handler_kind, STORE_KIND(kNativeDataProperty)),
+             &native_data_property);
+      Branch(Word32Equal(handler_kind, STORE_KIND(kSharedStructField)),
+             &shared_struct_field, &data);
 
       BIND(&accessor);
       HandleStoreAccessor(p, CAST(holder), handler_word);
 
       BIND(&native_data_property);
       HandleStoreICNativeDataProperty(p, CAST(holder), handler_word);
+
+      BIND(&shared_struct_field);
+      HandleStoreICSmiHandlerJSSharedStructFieldCase(p->context(), handler_word,
+                                                     CAST(holder), p->value());
 
       BIND(&data);
       // Handle non-transitioning field stores.
@@ -1335,8 +1372,7 @@ void AccessorAssembler::HandleStoreICHandlerCase(
     // |handler| is a heap object. Must be code, call it.
     BIND(&call_handler);
     {
-      // TODO(v8:11880): call CodeT directly.
-      TNode<Code> code_handler = FromCodeT(CAST(strong_handler));
+      TNode<CodeT> code_handler = CAST(strong_handler);
       TailCallStub(StoreWithVectorDescriptor{}, code_handler, p->context(),
                    p->receiver(), p->name(), p->value(), p->slot(),
                    p->vector());
@@ -1665,6 +1701,55 @@ void AccessorAssembler::OverwriteExistingFastDataProperty(
   BIND(&done);
 }
 
+void AccessorAssembler::StoreJSSharedStructField(
+    TNode<Context> context, TNode<HeapObject> shared_struct,
+    TNode<Map> shared_struct_map, TNode<DescriptorArray> descriptors,
+    TNode<IntPtrT> descriptor_name_index, TNode<Uint32T> details,
+    TNode<Object> maybe_local_value) {
+  CSA_DCHECK(this, IsJSSharedStruct(shared_struct));
+
+  Label done(this);
+
+  TNode<UintPtrT> field_index =
+      DecodeWordFromWord32<PropertyDetails::FieldIndexField>(details);
+  field_index = Unsigned(IntPtrAdd(
+      field_index,
+      Unsigned(LoadMapInobjectPropertiesStartInWords(shared_struct_map))));
+
+  TNode<IntPtrT> instance_size_in_words =
+      LoadMapInstanceSizeInWords(shared_struct_map);
+
+  TVARIABLE(Object, shared_value, maybe_local_value);
+  SharedValueBarrier(context, maybe_local_value, &shared_value);
+
+  Label inobject(this), backing_store(this);
+  Branch(UintPtrLessThan(field_index, instance_size_in_words), &inobject,
+         &backing_store);
+
+  BIND(&inobject);
+  {
+    TNode<IntPtrT> field_offset = Signed(TimesTaggedSize(field_index));
+    StoreJSSharedStructInObjectField(shared_struct, field_offset,
+                                     shared_value.value());
+    Goto(&done);
+  }
+
+  BIND(&backing_store);
+  {
+    TNode<IntPtrT> backing_store_index =
+        Signed(IntPtrSub(field_index, instance_size_in_words));
+
+    Label tagged_rep(this), double_rep(this);
+    TNode<PropertyArray> properties =
+        CAST(LoadFastProperties(CAST(shared_struct)));
+    StoreJSSharedStructPropertyArrayElement(properties, backing_store_index,
+                                            shared_value.value());
+    Goto(&done);
+  }
+
+  BIND(&done);
+}
+
 void AccessorAssembler::CheckPrototypeValidityCell(
     TNode<Object> maybe_validity_cell, Label* miss) {
   Label done(this);
@@ -1712,10 +1797,9 @@ void AccessorAssembler::HandleStoreICProtoHandler(
              &if_transitioning_element_store);
       BIND(&if_element_store);
       {
-        // TODO(v8:11880): call CodeT directly.
-        TailCallStub(StoreWithVectorDescriptor{}, FromCodeT(code_handler),
-                     p->context(), p->receiver(), p->name(), p->value(),
-                     p->slot(), p->vector());
+        TailCallStub(StoreWithVectorDescriptor{}, code_handler, p->context(),
+                     p->receiver(), p->name(), p->value(), p->slot(),
+                     p->vector());
       }
 
       BIND(&if_transitioning_element_store);
@@ -1727,10 +1811,9 @@ void AccessorAssembler::HandleStoreICProtoHandler(
 
         GotoIf(IsDeprecatedMap(transition_map), miss);
 
-        // TODO(v8:11880): call CodeT directly.
-        TailCallStub(StoreTransitionDescriptor{}, FromCodeT(code_handler),
-                     p->context(), p->receiver(), p->name(), transition_map,
-                     p->value(), p->slot(), p->vector());
+        TailCallStub(StoreTransitionDescriptor{}, code_handler, p->context(),
+                     p->receiver(), p->name(), transition_map, p->value(),
+                     p->slot(), p->vector());
       }
     };
   }
@@ -2950,7 +3033,7 @@ void AccessorAssembler::LoadIC_BytecodeHandler(const LazyLoadICParameters* p,
 
     // Call into the stub that implements the non-inlined parts of LoadIC.
     Callable ic = Builtins::CallableFor(isolate(), Builtin::kLoadIC_Noninlined);
-    TNode<Code> code_target = HeapConstant(ic.code());
+    TNode<CodeT> code_target = HeapConstant(ic.code());
     exit_point->ReturnCallStub(ic.descriptor(), code_target, p->context(),
                                p->receiver_and_lookup_start_object(), p->name(),
                                p->slot(), p->vector());
@@ -3977,8 +4060,7 @@ void AccessorAssembler::StoreInArrayLiteralIC(const StoreICParameters* p) {
 
       {
         // Call the handler.
-        // TODO(v8:11880): call CodeT directly.
-        TNode<Code> code_handler = FromCodeT(CAST(handler));
+        TNode<CodeT> code_handler = CAST(handler);
         TailCallStub(StoreWithVectorDescriptor{}, code_handler, p->context(),
                      p->receiver(), p->name(), p->value(), p->slot(),
                      p->vector());
@@ -3991,9 +4073,8 @@ void AccessorAssembler::StoreInArrayLiteralIC(const StoreICParameters* p) {
         TNode<Map> transition_map =
             CAST(GetHeapObjectAssumeWeak(maybe_transition_map, &miss));
         GotoIf(IsDeprecatedMap(transition_map), &miss);
-        // TODO(v8:11880): call CodeT directly.
-        TNode<Code> code = FromCodeT(
-            CAST(LoadObjectField(handler, StoreHandler::kSmiHandlerOffset)));
+        TNode<CodeT> code =
+            CAST(LoadObjectField(handler, StoreHandler::kSmiHandlerOffset));
         TailCallStub(StoreTransitionDescriptor{}, code, p->context(),
                      p->receiver(), p->name(), transition_map, p->value(),
                      p->slot(), p->vector());

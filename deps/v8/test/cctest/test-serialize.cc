@@ -651,7 +651,8 @@ UNINITIALIZED_TEST(ContextSerializerCustomContext) {
       CHECK(context->global_proxy() == *global_proxy);
       Handle<String> o = isolate->factory()->NewStringFromAsciiChecked("o");
       Handle<JSObject> global_object(context->global_object(), isolate);
-      Handle<Object> property = JSReceiver::GetDataProperty(global_object, o);
+      Handle<Object> property =
+          JSReceiver::GetDataProperty(isolate, global_object, o);
       CHECK(property.is_identical_to(global_proxy));
 
       v8::Local<v8::Context> v8_context = v8::Utils::ToLocal(context);
@@ -2163,9 +2164,9 @@ TEST(CodeSerializerLargeStrings) {
 
   CHECK_EQ(6 * 1999999, Handle<String>::cast(copy_result)->length());
   Handle<Object> property = JSReceiver::GetDataProperty(
-      isolate->global_object(), f->NewStringFromAsciiChecked("s"));
+      isolate, isolate->global_object(), f->NewStringFromAsciiChecked("s"));
   CHECK(isolate->heap()->InSpace(HeapObject::cast(*property), LO_SPACE));
-  property = JSReceiver::GetDataProperty(isolate->global_object(),
+  property = JSReceiver::GetDataProperty(isolate, isolate->global_object(),
                                          f->NewStringFromAsciiChecked("t"));
   CHECK(isolate->heap()->InSpace(HeapObject::cast(*property), LO_SPACE));
   // Make sure we do not serialize too much, e.g. include the source string.
@@ -3835,6 +3836,39 @@ UNINITIALIZED_TEST(SnapshotAccessorDescriptors) {
   delete[] data1.data;
 }
 
+UNINITIALIZED_TEST(SnapshotObjectDefinePropertyWhenNewGlobalTemplate) {
+  const char* source1 =
+      "Object.defineProperty(this, 'property1', {\n"
+      "  value: 42,\n"
+      "  writable: false\n"
+      "});\n"
+      "var bValue = 38;\n"
+      "Object.defineProperty(this, 'property2', {\n"
+      "  get() { return bValue; },\n"
+      "  set(newValue) { bValue = newValue; }\n"
+      "});";
+  v8::StartupData data1 = CreateSnapshotDataBlob(source1);
+
+  v8::Isolate::CreateParams params1;
+  params1.snapshot_blob = &data1;
+  params1.array_buffer_allocator = CcTest::array_buffer_allocator();
+
+  v8::Isolate* isolate1 = v8::Isolate::New(params1);
+  {
+    v8::Isolate::Scope i_scope(isolate1);
+    v8::HandleScope h_scope(isolate1);
+    v8::Local<v8::ObjectTemplate> global_template =
+        v8::ObjectTemplate::New(isolate1);
+    v8::Local<v8::Context> context =
+        v8::Context::New(isolate1, nullptr, global_template);
+    v8::Context::Scope c_scope(context);
+    ExpectInt32("this.property1", 42);
+    ExpectInt32("this.property2", 38);
+  }
+  isolate1->Dispose();
+  delete[] data1.data;
+}
+
 UNINITIALIZED_TEST(SnapshotCreatorIncludeGlobalProxy) {
   DisableAlwaysOpt();
   DisableEmbeddedBlobRefcounting();
@@ -4307,10 +4341,16 @@ UNINITIALIZED_TEST(ClassFieldsReferenceClassVariable) {
       v8::Local<v8::Context> context = v8::Context::New(isolate);
       v8::Context::Scope context_scope(context);
       CompileRun(
-          "class Klass {"
-          "  #consturctor = Klass;"
+          "class PrivateFieldClass {"
+          "  #consturctor = PrivateFieldClass;"
           "  func() {"
           "    return this.#consturctor;"
+          "  }"
+          "}"
+          "class PublicFieldClass {"
+          "  ctor = PublicFieldClass;"
+          "  func() {"
+          "    return this.ctor;"
           "  }"
           "}");
       creator.SetDefaultContext(context);
@@ -4329,7 +4369,8 @@ UNINITIALIZED_TEST(ClassFieldsReferenceClassVariable) {
     v8::Local<v8::Context> context = v8::Context::New(isolate);
     CHECK(!context.IsEmpty());
     v8::Context::Scope context_scope(context);
-    ExpectTrue("new Klass().func() === Klass");
+    ExpectTrue("new PrivateFieldClass().func() === PrivateFieldClass");
+    ExpectTrue("new PublicFieldClass().func() === PublicFieldClass");
   }
   isolate->Dispose();
   delete[] blob.data;

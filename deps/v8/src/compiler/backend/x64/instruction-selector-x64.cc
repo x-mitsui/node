@@ -297,8 +297,8 @@ ArchOpcode GetLoadOpcode(LoadRepresentation load_rep) {
     case MachineRepresentation::kWord64:
       opcode = kX64Movq;
       break;
-    case MachineRepresentation::kCagedPointer:
-      opcode = kX64MovqDecodeCagedPointer;
+    case MachineRepresentation::kSandboxedPointer:
+      opcode = kX64MovqDecodeSandboxedPointer;
       break;
     case MachineRepresentation::kSimd128:
       opcode = kX64Movdqu;
@@ -336,8 +336,8 @@ ArchOpcode GetStoreOpcode(StoreRepresentation store_rep) {
       return kX64MovqCompressTagged;
     case MachineRepresentation::kWord64:
       return kX64Movq;
-    case MachineRepresentation::kCagedPointer:
-      return kX64MovqEncodeCagedPointer;
+    case MachineRepresentation::kSandboxedPointer:
+      return kX64MovqEncodeSandboxedPointer;
     case MachineRepresentation::kSimd128:
       return kX64Movdqu;
     case MachineRepresentation::kNone:  // Fall through.
@@ -2403,6 +2403,28 @@ void VisitAtomicCompareExchange(InstructionSelector* selector, Node* node,
   selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs);
 }
 
+// Used instead of CanCover in VisitWordCompareZero: even if CanCover(user,
+// node) returns false, if |node| is a comparison, then it does not require any
+// registers, and can thus be covered by |user|.
+bool CanCoverForCompareZero(InstructionSelector* selector, Node* user,
+                            Node* node) {
+  if (selector->CanCover(user, node)) {
+    return true;
+  }
+  // Checking if |node| is a comparison. If so, it doesn't required any
+  // registers, and, as such, it can always be covered by |user|.
+  switch (node->opcode()) {
+#define CHECK_CMP_OP(op) \
+  case IrOpcode::k##op:  \
+    return true;
+    MACHINE_COMPARE_BINOP_LIST(CHECK_CMP_OP)
+#undef CHECK_CMP_OP
+    default:
+      break;
+  }
+  return false;
+}
+
 }  // namespace
 
 // Shared routine for word comparison against zero.
@@ -2418,7 +2440,7 @@ void InstructionSelector::VisitWordCompareZero(Node* user, Node* value,
     cont->Negate();
   }
 
-  if (CanCover(user, value)) {
+  if (CanCoverForCompareZero(this, user, value)) {
     switch (value->opcode()) {
       case IrOpcode::kWord32Equal:
         cont->OverwriteAndNegateIfEqual(kEqual);
@@ -2438,7 +2460,7 @@ void InstructionSelector::VisitWordCompareZero(Node* user, Node* value,
       case IrOpcode::kWord64Equal: {
         cont->OverwriteAndNegateIfEqual(kEqual);
         Int64BinopMatcher m(value);
-        if (m.right().Is(0)) {
+        if (m.right().Is(0) && CanCover(user, value)) {
           // Try to combine the branch with a comparison.
           Node* const eq_user = m.node();
           Node* const eq_value = m.left().node();
@@ -2548,7 +2570,6 @@ void InstructionSelector::VisitWordCompareZero(Node* user, Node* value,
         break;
     }
   }
-
   // Branch could not be combined with a compare, emit compare against 0.
   VisitCompareZero(this, user, value, kX64Cmp32, cont);
 }

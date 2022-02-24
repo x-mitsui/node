@@ -164,8 +164,10 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     __ CheckPageFlag(value_, MemoryChunk::kPointersToHereAreInterestingMask, eq,
                      exit());
     RememberedSetAction const remembered_set_action =
-        mode_ > RecordWriteMode::kValueIsMap ? RememberedSetAction::kEmit
-                                             : RememberedSetAction::kOmit;
+        mode_ > RecordWriteMode::kValueIsMap ||
+                FLAG_use_full_record_write_builtin
+            ? RememberedSetAction::kEmit
+            : RememberedSetAction::kOmit;
     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
                                             ? SaveFPRegsMode::kSave
                                             : SaveFPRegsMode::kIgnore;
@@ -962,11 +964,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kLoong64Div_w:
       __ Div_w(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
-      __ masknez(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      __ maskeqz(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
       break;
     case kLoong64Div_wu:
       __ Div_wu(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
-      __ masknez(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      __ maskeqz(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
       break;
     case kLoong64Mod_w:
       __ Mod_w(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
@@ -979,11 +981,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kLoong64Div_d:
       __ Div_d(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
-      __ masknez(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      __ maskeqz(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
       break;
     case kLoong64Div_du:
       __ Div_du(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
-      __ masknez(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      __ maskeqz(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
       break;
     case kLoong64Mod_d:
       __ Mod_d(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
@@ -1938,8 +1940,9 @@ void CodeGenerator::AssembleArchDeoptBranch(Instruction* instr,
   AssembleArchBranch(instr, branch);
 }
 
-void CodeGenerator::AssembleArchJump(RpoNumber target) {
-  if (!IsNextInAssemblyOrder(target)) __ Branch(GetLabel(target));
+void CodeGenerator::AssembleArchJumpRegardlessOfAssemblyOrder(
+    RpoNumber target) {
+  __ Branch(GetLabel(target));
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -2382,9 +2385,6 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
   if (drop_jsargs) {
     // We must pop all arguments from the stack (including the receiver). This
     // number of arguments is given by max(1 + argc_reg, parameter_count).
-    if (!kJSArgcIncludesReceiver) {
-      __ Add_d(t0, t0, Operand(1));  // Also pop the receiver.
-    }
     if (parameter_slots > 1) {
       __ li(t1, parameter_slots);
       __ slt(t2, t0, t1);

@@ -85,9 +85,10 @@ MaybeHandle<Object> JSReceiver::GetElement(Isolate* isolate,
   return Object::GetProperty(&it);
 }
 
-Handle<Object> JSReceiver::GetDataProperty(Handle<JSReceiver> object,
+Handle<Object> JSReceiver::GetDataProperty(Isolate* isolate,
+                                           Handle<JSReceiver> object,
                                            Handle<Name> name) {
-  LookupIterator it(object->GetIsolate(), object, name, object,
+  LookupIterator it(isolate, object, name, object,
                     LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR);
   if (!it.IsFound()) return it.factory()->undefined_value();
   return GetDataProperty(&it);
@@ -307,10 +308,6 @@ int JSObject::GetEmbedderFieldOffset(int index) {
   return GetEmbedderFieldsStartOffset() + (kEmbedderDataSlotSize * index);
 }
 
-void JSObject::InitializeEmbedderField(Isolate* isolate, int index) {
-  EmbedderDataSlot(*this, index).AllocateExternalPointerEntry(isolate);
-}
-
 Object JSObject::GetEmbedderField(int index) {
   return EmbedderDataSlot(*this, index).load_tagged();
 }
@@ -334,7 +331,7 @@ Object JSObject::RawFastPropertyAt(FieldIndex index) const {
 Object JSObject::RawFastPropertyAt(PtrComprCageBase cage_base,
                                    FieldIndex index) const {
   if (index.is_inobject()) {
-    return TaggedField<Object>::load(cage_base, *this, index.offset());
+    return TaggedField<Object>::Relaxed_Load(cage_base, *this, index.offset());
   } else {
     return property_array(cage_base).get(cage_base,
                                          index.outobject_array_index());
@@ -707,19 +704,18 @@ DEF_GETTER(JSReceiver, property_array, PropertyArray) {
   return PropertyArray::cast(prop);
 }
 
-Maybe<bool> JSReceiver::HasProperty(Handle<JSReceiver> object,
+Maybe<bool> JSReceiver::HasProperty(Isolate* isolate, Handle<JSReceiver> object,
                                     Handle<Name> name) {
-  Isolate* isolate = object->GetIsolate();
   PropertyKey key(isolate, name);
   LookupIterator it(isolate, object, key, object);
   return HasProperty(&it);
 }
 
-Maybe<bool> JSReceiver::HasOwnProperty(Handle<JSReceiver> object,
+Maybe<bool> JSReceiver::HasOwnProperty(Isolate* isolate,
+                                       Handle<JSReceiver> object,
                                        uint32_t index) {
   if (object->IsJSObject()) {  // Shortcut.
-    LookupIterator it(object->GetIsolate(), object, index, object,
-                      LookupIterator::OWN);
+    LookupIterator it(isolate, object, index, object, LookupIterator::OWN);
     return HasProperty(&it);
   }
 
@@ -752,8 +748,9 @@ Maybe<PropertyAttributes> JSReceiver::GetOwnPropertyAttributes(
   return GetPropertyAttributes(&it);
 }
 
-Maybe<bool> JSReceiver::HasElement(Handle<JSReceiver> object, uint32_t index) {
-  LookupIterator it(object->GetIsolate(), object, index, object);
+Maybe<bool> JSReceiver::HasElement(Isolate* isolate, Handle<JSReceiver> object,
+                                   uint32_t index) {
+  LookupIterator it(isolate, object, index, object);
   return HasProperty(&it);
 }
 

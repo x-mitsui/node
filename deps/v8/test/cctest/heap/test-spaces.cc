@@ -144,7 +144,7 @@ static void VerifyMemoryChunk(Isolate* isolate, Heap* heap,
         memory_chunk->address() + memory_chunk->size());
   CHECK(static_cast<size_t>(memory_chunk->area_size()) == commit_area_size);
 
-  memory_allocator->Free<MemoryAllocator::kFull>(memory_chunk);
+  memory_allocator->Free(MemoryAllocator::kImmediately, memory_chunk);
 }
 
 static unsigned int PseudorandomAreaSize() {
@@ -201,8 +201,8 @@ TEST(MemoryAllocator) {
   CHECK(!faked_space.first_page());
   CHECK(!faked_space.last_page());
   Page* first_page = memory_allocator->AllocatePage(
-      faked_space.AreaSize(), static_cast<PagedSpace*>(&faked_space),
-      NOT_EXECUTABLE);
+      MemoryAllocator::kRegular, faked_space.AreaSize(),
+      static_cast<PagedSpace*>(&faked_space), NOT_EXECUTABLE);
 
   faked_space.memory_chunk_list().PushBack(first_page);
   CHECK(first_page->next_page() == nullptr);
@@ -214,8 +214,8 @@ TEST(MemoryAllocator) {
 
   // Again, we should get n or n - 1 pages.
   Page* other = memory_allocator->AllocatePage(
-      faked_space.AreaSize(), static_cast<PagedSpace*>(&faked_space),
-      NOT_EXECUTABLE);
+      MemoryAllocator::kRegular, faked_space.AreaSize(),
+      static_cast<PagedSpace*>(&faked_space), NOT_EXECUTABLE);
   total_pages++;
   faked_space.memory_chunk_list().PushBack(other);
   int page_count = 0;
@@ -344,14 +344,14 @@ TEST(OldLargeObjectSpace) {
   while (true) {
     {
       AllocationResult allocation = lo->AllocateRaw(lo_size);
-      if (allocation.IsRetry()) break;
+      if (allocation.IsFailure()) break;
       ho = HeapObject::cast(allocation.ToObjectChecked());
       Handle<HeapObject> keep_alive(ho, isolate);
     }
   }
 
   CHECK(!lo->IsEmpty());
-  CHECK(lo->AllocateRaw(lo_size).IsRetry());
+  CHECK(lo->AllocateRaw(lo_size).IsFailure());
 }
 
 #ifndef DEBUG
@@ -394,6 +394,9 @@ TEST(SizeOfInitialHeap) {
   Heap* heap = isolate->heap();
   for (int i = FIRST_GROWABLE_PAGED_SPACE; i <= LAST_GROWABLE_PAGED_SPACE;
        i++) {
+    // Map space might be disabled.
+    if (i == MAP_SPACE && !heap->paged_space(i)) continue;
+
     // Debug code can be very large, so skip CODE_SPACE if we are generating it.
     if (i == CODE_SPACE && i::FLAG_debug_code) continue;
 
@@ -411,7 +414,7 @@ TEST(SizeOfInitialHeap) {
 
 static HeapObject AllocateUnaligned(NewSpace* space, int size) {
   AllocationResult allocation = space->AllocateRaw(size, kTaggedAligned);
-  CHECK(!allocation.IsRetry());
+  CHECK(!allocation.IsFailure());
   HeapObject filler;
   CHECK(allocation.To(&filler));
   space->heap()->CreateFillerObjectAt(filler.address(), size,
@@ -421,7 +424,7 @@ static HeapObject AllocateUnaligned(NewSpace* space, int size) {
 
 static HeapObject AllocateUnaligned(PagedSpace* space, int size) {
   AllocationResult allocation = space->AllocateRaw(size, kTaggedAligned);
-  CHECK(!allocation.IsRetry());
+  CHECK(!allocation.IsFailure());
   HeapObject filler;
   CHECK(allocation.To(&filler));
   space->heap()->CreateFillerObjectAt(filler.address(), size,
@@ -431,7 +434,7 @@ static HeapObject AllocateUnaligned(PagedSpace* space, int size) {
 
 static HeapObject AllocateUnaligned(OldLargeObjectSpace* space, int size) {
   AllocationResult allocation = space->AllocateRaw(size);
-  CHECK(!allocation.IsRetry());
+  CHECK(!allocation.IsFailure());
   HeapObject filler;
   CHECK(allocation.To(&filler));
   return filler;
@@ -808,8 +811,8 @@ TEST(NoMemoryForNewPage) {
   LinearAllocationArea allocation_info;
   OldSpace faked_space(heap, &allocation_info);
   Page* page = memory_allocator->AllocatePage(
-      faked_space.AreaSize(), static_cast<PagedSpace*>(&faked_space),
-      NOT_EXECUTABLE);
+      MemoryAllocator::kRegular, faked_space.AreaSize(),
+      static_cast<PagedSpace*>(&faked_space), NOT_EXECUTABLE);
 
   CHECK_NULL(page);
 }

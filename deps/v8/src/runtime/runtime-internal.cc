@@ -7,17 +7,14 @@
 #include "src/api/api.h"
 #include "src/ast/ast-traversal-visitor.h"
 #include "src/ast/prettyprinter.h"
-#include "src/baseline/baseline-batch-compiler.h"
-#include "src/baseline/baseline.h"
 #include "src/builtins/builtins.h"
-#include "src/codegen/compiler.h"
 #include "src/common/message-template.h"
 #include "src/debug/debug.h"
 #include "src/execution/arguments-inl.h"
 #include "src/execution/frames-inl.h"
 #include "src/execution/isolate-inl.h"
 #include "src/execution/messages.h"
-#include "src/execution/runtime-profiler.h"
+#include "src/execution/tiering-manager.h"
 #include "src/handles/maybe-handles.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
@@ -342,42 +339,7 @@ RUNTIME_FUNCTION(Runtime_StackGuardWithGap) {
   return isolate->stack_guard()->HandleInterrupts();
 }
 
-namespace {
-
-void BytecodeBudgetInterruptFromBytecode(Isolate* isolate,
-                                         Handle<JSFunction> function) {
-  function->SetInterruptBudget();
-  bool should_mark_for_optimization = function->has_feedback_vector();
-  if (!function->has_feedback_vector()) {
-    IsCompiledScope is_compiled_scope(
-        function->shared().is_compiled_scope(isolate));
-    JSFunction::EnsureFeedbackVector(function, &is_compiled_scope);
-    DCHECK(is_compiled_scope.is_compiled());
-    // Also initialize the invocation count here. This is only really needed for
-    // OSR. When we OSR functions with lazy feedback allocation we want to have
-    // a non zero invocation count so we can inline functions.
-    function->feedback_vector().set_invocation_count(1, kRelaxedStore);
-  }
-  if (CanCompileWithBaseline(isolate, function->shared()) &&
-      !function->ActiveTierIsBaseline()) {
-    if (FLAG_baseline_batch_compilation) {
-      isolate->baseline_batch_compiler()->EnqueueFunction(function);
-    } else {
-      IsCompiledScope is_compiled_scope(
-          function->shared().is_compiled_scope(isolate));
-      Compiler::CompileBaseline(isolate, function, Compiler::CLEAR_EXCEPTION,
-                                &is_compiled_scope);
-    }
-  }
-  if (should_mark_for_optimization) {
-    SealHandleScope shs(isolate);
-    isolate->counters()->runtime_profiler_ticks()->Increment();
-    isolate->runtime_profiler()->MarkCandidatesForOptimizationFromBytecode();
-  }
-}
-}  // namespace
-
-RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptWithStackCheckFromBytecode) {
+RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptWithStackCheck) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 0);
@@ -399,35 +361,17 @@ RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptWithStackCheckFromBytecode) {
     }
   }
 
-  BytecodeBudgetInterruptFromBytecode(isolate, function);
+  isolate->tiering_manager()->OnInterruptTick(function);
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptFromBytecode) {
+RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterrupt) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 0);
   TRACE_EVENT0("v8.execute", "V8.BytecodeBudgetInterrupt");
 
-  BytecodeBudgetInterruptFromBytecode(isolate, function);
-  return ReadOnlyRoots(isolate).undefined_value();
-}
-
-RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptFromCode) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  CONVERT_ARG_HANDLE_CHECKED(FeedbackCell, feedback_cell, 0);
-
-  // TODO(leszeks): Consider checking stack interrupts here, and removing
-  // those checks for code that can have budget interrupts.
-
-  DCHECK(feedback_cell->value().IsFeedbackVector());
-
-  FeedbackVector::SetInterruptBudget(*feedback_cell);
-
-  SealHandleScope shs(isolate);
-  isolate->counters()->runtime_profiler_ticks()->Increment();
-  isolate->runtime_profiler()->MarkCandidatesForOptimizationFromCode();
+  isolate->tiering_manager()->OnInterruptTick(function);
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
@@ -470,8 +414,6 @@ RUNTIME_FUNCTION(Runtime_AllocateInYoungGeneration) {
       AllowLargeObjectAllocationFlag::decode(flags);
   CHECK(IsAligned(size, kTaggedSize));
   CHECK_GT(size, 0);
-  CHECK(FLAG_young_generation_large_objects ||
-        size <= kMaxRegularHeapObjectSize);
   if (!allow_large_object_allocation) {
     CHECK(size <= kMaxRegularHeapObjectSize);
   }
@@ -741,7 +683,8 @@ RUNTIME_FUNCTION(Runtime_GetInitializerFunction) {
 
   CONVERT_ARG_HANDLE_CHECKED(JSReceiver, constructor, 0);
   Handle<Symbol> key = isolate->factory()->class_fields_symbol();
-  Handle<Object> initializer = JSReceiver::GetDataProperty(constructor, key);
+  Handle<Object> initializer =
+      JSReceiver::GetDataProperty(isolate, constructor, key);
   return *initializer;
 }
 
@@ -755,6 +698,16 @@ RUNTIME_FUNCTION(Runtime_DoubleToStringWithRadix) {
   Handle<String> result = isolate->factory()->NewStringFromAsciiChecked(str);
   DeleteArray(str);
   return *result;
+}
+
+RUNTIME_FUNCTION(Runtime_SharedValueBarrierSlow) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(HeapObject, value, 0);
+  Handle<Object> shared_value;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, shared_value, Object::ShareSlow(isolate, value, kThrowOnError));
+  return *shared_value;
 }
 
 }  // namespace internal

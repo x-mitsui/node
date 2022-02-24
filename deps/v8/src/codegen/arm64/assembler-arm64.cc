@@ -73,7 +73,7 @@ constexpr unsigned CpuFeaturesFromCompiler() {
 
 constexpr unsigned CpuFeaturesFromTargetOS() {
   unsigned features = 0;
-#if defined(V8_TARGET_OS_MACOSX)
+#if defined(V8_TARGET_OS_MACOS)
   features |= 1u << JSCVT;
 #endif
   return features;
@@ -420,7 +420,7 @@ void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
   const int safepoint_table_offset =
       (safepoint_table_builder == kNoSafepointTable)
           ? handler_table_offset2
-          : safepoint_table_builder->GetCodeOffset();
+          : safepoint_table_builder->safepoint_table_offset();
   const int reloc_info_offset =
       static_cast<int>(reloc_info_writer.pos() - buffer_->start());
   CodeDesc::Initialize(desc, this, safepoint_table_offset,
@@ -4390,7 +4390,7 @@ void Assembler::near_call(int offset, RelocInfo::Mode rmode) {
 void Assembler::near_call(HeapObjectRequest request) {
   BlockPoolsScope no_pool_before_bl_instr(this);
   RequestHeapObject(request);
-  EmbeddedObjectIndex index = AddEmbeddedObject(Handle<Code>());
+  EmbeddedObjectIndex index = AddEmbeddedObject(Handle<CodeT>());
   RecordRelocInfo(RelocInfo::CODE_TARGET, index, NO_POOL_ENTRY);
   DCHECK(is_int32(index));
   bl(static_cast<int>(index));

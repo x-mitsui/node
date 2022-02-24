@@ -48,7 +48,7 @@ CodeKinds JSFunction::GetAvailableCodeKinds() const {
   // Check the optimized code cache.
   if (has_feedback_vector() && feedback_vector().has_optimized_code() &&
       !feedback_vector().optimized_code().marked_for_deoptimization()) {
-    Code code = feedback_vector().optimized_code();
+    CodeT code = feedback_vector().optimized_code();
     DCHECK(CodeKindIsOptimizedJSFunction(code.kind()));
     result |= CodeKindToCodeKindFlag(code.kind());
   }
@@ -87,9 +87,6 @@ V8_WARN_UNUSED_RESULT bool HighestTierOf(CodeKinds kinds,
   if ((kinds & CodeKindFlag::TURBOFAN) != 0) {
     *highest_tier = CodeKind::TURBOFAN;
     return true;
-  } else if ((kinds & CodeKindFlag::TURBOPROP) != 0) {
-    *highest_tier = CodeKind::TURBOPROP;
-    return true;
   } else if ((kinds & CodeKindFlag::BASELINE) != 0) {
     *highest_tier = CodeKind::BASELINE;
     return true;
@@ -120,7 +117,7 @@ base::Optional<CodeKind> JSFunction::GetActiveTier() const {
 #ifdef DEBUG
   CHECK(highest_tier == CodeKind::TURBOFAN ||
         highest_tier == CodeKind::BASELINE ||
-        highest_tier == CodeKind::TURBOPROP ||
+        highest_tier == CodeKind::MAGLEV ||
         highest_tier == CodeKind::INTERPRETED_FUNCTION);
 
   if (highest_tier == CodeKind::INTERPRETED_FUNCTION) {
@@ -128,7 +125,7 @@ base::Optional<CodeKind> JSFunction::GetActiveTier() const {
           (CodeKindIsOptimizedJSFunction(code().kind()) &&
            code().marked_for_deoptimization()) ||
           (code().builtin_id() == Builtin::kCompileLazy &&
-           shared().IsInterpreted()));
+           shared().HasBytecodeArray() && !shared().HasBaselineCode()));
   }
 #endif  // DEBUG
 
@@ -147,23 +144,8 @@ bool JSFunction::ActiveTierIsBaseline() const {
   return GetActiveTier() == CodeKind::BASELINE;
 }
 
-bool JSFunction::ActiveTierIsToptierTurboprop() const {
-  return FLAG_turboprop_as_toptier && GetActiveTier() == CodeKind::TURBOPROP;
-}
-
-bool JSFunction::ActiveTierIsMidtierTurboprop() const {
-  return FLAG_turboprop && !FLAG_turboprop_as_toptier &&
-         GetActiveTier() == CodeKind::TURBOPROP;
-}
-
-CodeKind JSFunction::NextTier() const {
-  if (V8_UNLIKELY(FLAG_turboprop) && ActiveTierIsMidtierTurboprop()) {
-    return CodeKind::TURBOFAN;
-  } else if (V8_UNLIKELY(FLAG_turboprop)) {
-    DCHECK(ActiveTierIsIgnition() || ActiveTierIsBaseline());
-    return CodeKind::TURBOPROP;
-  }
-  return CodeKind::TURBOFAN;
+bool JSFunction::ActiveTierIsMaglev() const {
+  return GetActiveTier() == CodeKind::MAGLEV;
 }
 
 bool JSFunction::CanDiscardCompiled() const {
@@ -179,6 +161,62 @@ bool JSFunction::CanDiscardCompiled() const {
   if (CodeKindIsOptimizedJSFunction(code().kind())) return true;
   CodeKinds result = GetAvailableCodeKinds();
   return (result & kJSFunctionCodeKindsMask) != 0;
+}
+
+namespace {
+
+constexpr OptimizationMarker OptimizationMarkerFor(CodeKind target_kind,
+                                                   ConcurrencyMode mode) {
+  DCHECK(target_kind == CodeKind::MAGLEV || target_kind == CodeKind::TURBOFAN);
+  return target_kind == CodeKind::MAGLEV
+             ? (mode == ConcurrencyMode::kConcurrent
+                    ? OptimizationMarker::kCompileMaglev_Concurrent
+                    : OptimizationMarker::kCompileMaglev_NotConcurrent)
+             : (mode == ConcurrencyMode::kConcurrent
+                    ? OptimizationMarker::kCompileTurbofan_Concurrent
+                    : OptimizationMarker::kCompileTurbofan_NotConcurrent);
+}
+
+}  // namespace
+
+void JSFunction::MarkForOptimization(Isolate* isolate, CodeKind target_kind,
+                                     ConcurrencyMode mode) {
+  if (!isolate->concurrent_recompilation_enabled() ||
+      isolate->bootstrapper()->IsActive()) {
+    mode = ConcurrencyMode::kNotConcurrent;
+  }
+
+  DCHECK(CodeKindIsOptimizedJSFunction(target_kind));
+  DCHECK(!is_compiled() || ActiveTierIsIgnition() || ActiveTierIsBaseline() ||
+         ActiveTierIsMaglev());
+  DCHECK(!ActiveTierIsTurbofan());
+  DCHECK(shared().HasBytecodeArray());
+  DCHECK(shared().allows_lazy_compilation() ||
+         !shared().optimization_disabled());
+
+  if (mode == ConcurrencyMode::kConcurrent) {
+    if (IsInOptimizationQueue()) {
+      if (FLAG_trace_concurrent_recompilation) {
+        PrintF("  ** Not marking ");
+        ShortPrint();
+        PrintF(" -- already in optimization queue.\n");
+      }
+      return;
+    }
+    if (FLAG_trace_concurrent_recompilation) {
+      PrintF("  ** Marking ");
+      ShortPrint();
+      PrintF(" for concurrent %s recompilation.\n",
+             CodeKindToString(target_kind));
+    }
+  }
+
+  SetOptimizationMarker(OptimizationMarkerFor(target_kind, mode));
+}
+
+void JSFunction::MarkForOptimization(ConcurrencyMode mode) {
+  Isolate* isolate = GetIsolate();
+  MarkForOptimization(isolate, CodeKind::TURBOFAN, mode);
 }
 
 // static
@@ -261,18 +299,16 @@ void JSFunction::EnsureClosureFeedbackCellArray(
   Handle<SharedFunctionInfo> shared(function->shared(), isolate);
   DCHECK(function->shared().HasBytecodeArray());
 
-  bool has_closure_feedback_cell_array =
+  const bool has_closure_feedback_cell_array =
       (function->has_closure_feedback_cell_array() ||
        function->has_feedback_vector());
   // Initialize the interrupt budget to the feedback vector allocation budget
   // when initializing the feedback cell for the first time or after a bytecode
   // flush. We retain the closure feedback cell array on bytecode flush, so
   // reset_budget_for_feedback_allocation is used to reset the budget in these
-  // cases. When using a fixed allocation budget, we reset it on a bytecode
-  // flush so no additional initialization is required here.
-  if (V8_UNLIKELY(FLAG_feedback_allocation_on_bytecode_size) &&
-      (reset_budget_for_feedback_allocation ||
-       !has_closure_feedback_cell_array)) {
+  // cases.
+  if (reset_budget_for_feedback_allocation ||
+      !has_closure_feedback_cell_array) {
     function->SetInterruptBudget();
   }
 
@@ -591,6 +627,7 @@ bool CanSubclassHaveInobjectProperties(InstanceType instance_type) {
     case JS_PROMISE_TYPE:
     case JS_REG_EXP_TYPE:
     case JS_SET_TYPE:
+    case JS_SHADOW_REALM_TYPE:
     case JS_SPECIAL_API_OBJECT_TYPE:
     case JS_TYPED_ARRAY_TYPE:
     case JS_PRIMITIVE_WRAPPER_TYPE:
@@ -701,8 +738,9 @@ bool FastInitializeDerivedMap(Isolate* isolate, Handle<JSFunction> new_target,
       static_cast<int>(constructor->shared().expected_nof_properties()),
       JSFunction::CalculateExpectedNofProperties(isolate, new_target));
   JSFunction::CalculateInstanceSizeHelper(
-      instance_type, true, embedder_fields, expected_nof_properties,
-      &instance_size, &in_object_properties);
+      instance_type, constructor_initial_map->has_prototype_slot(),
+      embedder_fields, expected_nof_properties, &instance_size,
+      &in_object_properties);
 
   int pre_allocated = constructor_initial_map->GetInObjectProperties() -
                       constructor_initial_map->UnusedPropertyFields();
@@ -778,7 +816,8 @@ MaybeHandle<Map> JSFunction::GetDerivedMap(Isolate* isolate,
                                JSReceiver::GetFunctionRealm(new_target), Map);
     DCHECK(context->IsNativeContext());
     Handle<Object> maybe_index = JSReceiver::GetDataProperty(
-        constructor, isolate->factory()->native_context_index_symbol());
+        isolate, constructor,
+        isolate->factory()->native_context_index_symbol());
     int index = maybe_index->IsSmi() ? Smi::ToInt(*maybe_index)
                                      : Context::OBJECT_FUNCTION_INDEX;
     Handle<JSFunction> realm_constructor(JSFunction::cast(context->get(index)),
@@ -902,7 +941,7 @@ Handle<String> JSFunction::GetDebugName(Handle<JSFunction> function) {
     // that exact behavior and go with SharedFunctionInfo::DebugName()
     // in case of the fast-path.
     Handle<Object> name =
-        GetDataProperty(function, isolate->factory()->name_string());
+        GetDataProperty(isolate, function, isolate->factory()->name_string());
     if (name->IsString()) return Handle<String>::cast(name);
   }
   return SharedFunctionInfo::DebugName(handle(function->shared(), isolate));
@@ -957,7 +996,7 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
 
   // Check if we should print {function} as a class.
   Handle<Object> maybe_class_positions = JSReceiver::GetDataProperty(
-      function, isolate->factory()->class_positions_symbol());
+      isolate, function, isolate->factory()->class_positions_symbol());
   if (maybe_class_positions->IsClassPositions()) {
     ClassPositions class_positions =
         ClassPositions::cast(*maybe_class_positions);
@@ -1059,13 +1098,8 @@ void JSFunction::CalculateInstanceSizeHelper(InstanceType instance_type,
   DCHECK_LE(static_cast<unsigned>(requested_embedder_fields),
             JSObject::kMaxEmbedderFields);
   int header_size = JSObject::GetHeaderSize(instance_type, has_prototype_slot);
-  if (requested_embedder_fields) {
-    // If there are embedder fields, then the embedder fields start offset must
-    // be properly aligned (embedder fields are located between object header
-    // and inobject fields).
-    header_size = RoundUp<kSystemPointerSize>(header_size);
-    requested_embedder_fields *= kEmbedderDataSlotSizeInTaggedSlots;
-  }
+  requested_embedder_fields *= kEmbedderDataSlotSizeInTaggedSlots;
+
   int max_nof_fields =
       (JSObject::kMaxInstanceSize - header_size) >> kTaggedSizeLog2;
   CHECK_LE(max_nof_fields, JSObject::kMaxInObjectProperties);
