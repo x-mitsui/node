@@ -162,3 +162,6 @@ __pycache__
 
 # === Rules for C++ development ===
 compile_commands.json
+
+# === Rules for myTest ===
+file.txt.gz
